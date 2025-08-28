@@ -1,13 +1,13 @@
+import os
+import json
+import requests
+import numpy as np
 import streamlit as st
 import tensorflow as tf
-import numpy as np
 from PIL import Image
-import json
-import os
-import requests
 
 # -----------------------------
-# Model + Labels Setup
+# URLs & local paths
 # -----------------------------
 MODEL_URL = "https://github.com/Abimuruga/Cricket-shot__classifier/releases/download/v1.0/cricket_model.h5"
 LABELS_URL = "https://raw.githubusercontent.com/Abimuruga/Cricket-shot__classifier/main/labels.json"
@@ -15,76 +15,132 @@ LABELS_URL = "https://raw.githubusercontent.com/Abimuruga/Cricket-shot__classifi
 MODEL_PATH = "cricket_model.h5"
 LABELS_PATH = "labels.json"
 
-# Function to download a file if missing
-def download_file(url, path):
+# -----------------------------
+# Helpers
+# -----------------------------
+def download_file(url: str, path: str):
+    """Download a file if it doesn't exist."""
+    if os.path.exists(path):
+        return
     try:
-        st.write(f"📥 Downloading {path}...")
-        response = requests.get(url)
-        response.raise_for_status()
+        st.write(f"📥 Downloading {os.path.basename(path)} ...")
+        r = requests.get(url, stream=True, timeout=60)
+        r.raise_for_status()
         with open(path, "wb") as f:
-            f.write(response.content)
-        st.success(f"✅ {path} downloaded successfully!")
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        st.success(f"✅ Downloaded {os.path.basename(path)}")
     except Exception as e:
-        st.error(f"❌ Failed to download {path}: {e}")
+        st.error(f"❌ Failed to download {os.path.basename(path)}: {e}")
         st.stop()
 
-# Ensure model exists
-if not os.path.exists(MODEL_PATH):
-    download_file(MODEL_URL, MODEL_PATH)
+def load_labels(path: str):
+    """Load labels from JSON; support list or dict formats."""
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        # If dict like {"0":"...", "1":"..."}, convert to list sorted by numeric key
+        if isinstance(data, dict):
+            # sort by int(key) to ensure correct order
+            items = sorted(data.items(), key=lambda kv: int(kv[0]))
+            return [v for _, v in items]
+        elif isinstance(data, list):
+            return data
+        else:
+            raise ValueError("labels.json must be a list or dict")
+    except Exception as e:
+        st.error(f"❌ Failed to load labels: {e}")
+        st.stop()
 
-# Ensure labels exist
-if not os.path.exists(LABELS_PATH):
-    download_file(LABELS_URL, LABELS_PATH)
+@st.cache_resource
+def get_model(model_path: str):
+    """Load and cache the TensorFlow model."""
+    try:
+        return tf.keras.models.load_model(model_path)
+    except Exception as e:
+        st.error(f"❌ Failed to load model: {e}")
+        st.stop()
 
-# Load model
-try:
-    model = tf.keras.models.load_model(MODEL_PATH)
-except Exception as e:
-    st.error(f"❌ Failed to load model: {e}")
-    st.stop()
+def preprocess_image(pil_img: Image.Image, model_input_shape):
+    """
+    Preprocess to match model input.
+    model_input_shape is (None, H, W, C) or similar; we extract H, W.
+    PIL resize expects (width, height).
+    """
+    # model.input_shape example: (None, 120, 160, 3)
+    if len(model_input_shape) < 4:
+        st.error(f"Unexpected model input_shape: {model_input_shape}")
+        st.stop()
 
-# Load class labels
-try:
-    with open(LABELS_PATH, "r") as f:
-        class_names = json.load(f)
-except Exception as e:
-    st.error(f"❌ Failed to load labels: {e}")
-    st.stop()
+    H = model_input_shape[1]
+    W = model_input_shape[2]
+    # Resize with PIL: (width, height)
+    img_resized = pil_img.resize((W, H))
+    # Normalize to [0,1]
+    arr = np.array(img_resized, dtype=np.float32) / 255.0
+
+    # If the model expects 3 channels but the image came as grayscale, expand
+    if len(arr.shape) == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+
+    # Add batch dimension
+    arr = np.expand_dims(arr, axis=0)
+    return arr
 
 # -----------------------------
-# Streamlit UI
+# Ensure files exist
+# -----------------------------
+download_file(MODEL_URL, MODEL_PATH)
+download_file(LABELS_URL, LABELS_PATH)
+
+# -----------------------------
+# Load resources
+# -----------------------------
+labels = load_labels(LABELS_PATH)
+model = get_model(MODEL_PATH)
+
+# -----------------------------
+# UI
 # -----------------------------
 st.title("🏏 Cricket Shot Classifier")
-st.write("Upload an image to classify the cricket shot.")
+st.caption("Upload an image to classify the cricket shot.")
 
 uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    # Open and show image
+    # Show
     img = Image.open(uploaded_file).convert("RGB")
-    st.image(img, caption="Uploaded Image", use_column_width=True)
+    st.image(img, caption="Uploaded Image", width="stretch")
 
-    # Preprocess
-    Resize correctly: (width=120, height=160)
-    img = img.resize((120, 160))   # not (160,120)
+    # Preprocess using the model's expected input size (e.g., 120x160x3)
+    img_array = preprocess_image(img, model.input_shape)
+    st.write(f"🖼️ Processed input shape: {img_array.shape}")  # should be (1, H, W, 3)
 
-# Normalize
-    img_array = np.array(img) / 255.0
+    # Predict
+    try:
+        preds = model.predict(img_array)
+        # preds shape: (1, num_classes)
+        probs = preds[0]
+        idx = int(np.argmax(probs))
+        conf = float(np.max(probs))
+    except Exception as e:
+        st.error(f"❌ Prediction failed: {e}")
+        st.stop()
 
-# Add batch dimension
-    img_array = np.expand_dims(img_array, axis=0)
+    # Display
+    if 0 <= idx < len(labels):
+        predicted_label = labels[idx]
+    else:
+        predicted_label = f"Class #{idx}"
 
-    st.write(f"🖼️ Final input shape to model: {img_array.shape}")
-
-
-    # Prediction
-    predictions = model.predict(img_array)
-    predicted_class = np.argmax(predictions, axis=1)[0]
-    confidence = np.max(predictions)
-
-    # Output
     st.subheader("📌 Prediction Result")
-    st.write(f"**Class:** {class_names[predicted_class]}")
-    st.write(f"**Confidence:** {confidence:.2f}")
+    st.write(f"**Class:** {predicted_label}")
+    st.write(f"**Confidence:** {conf*100:.2f}%")
 
-
+    # Optional: show top-3
+    if len(labels) >= 3:
+        top3_idx = np.argsort(probs)[-3:][::-1]
+        st.write("**Top-3 predictions:**")
+        for i in top3_idx:
+            st.write(f"- {labels[i]} — {probs[i]*100:.2f}%")
