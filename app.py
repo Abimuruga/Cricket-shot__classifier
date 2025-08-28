@@ -65,14 +65,17 @@ if uploaded_file is not None:
     st.image(img, caption="Uploaded Image", use_column_width=True)
 
     # Preprocess
-    #img = img.resize((224, 224))
-   # img_array = np.expand_dims(np.array(img) / 255.0, axis=0)
+    Resize correctly: (width=120, height=160)
+    img = img.resize((120, 160))   # not (160,120)
 
-    img = img.resize((160, 120))   # match training size
+# Normalize
     img_array = np.array(img) / 255.0
+
+# Add batch dimension
     img_array = np.expand_dims(img_array, axis=0)
 
-    st.write(f"🖼️ Image processed to shape: {img_array.shape}")
+    st.write(f"🖼️ Final input shape to model: {img_array.shape}")
+
 
     # Prediction
     predictions = model.predict(img_array)
@@ -83,4 +86,5 @@ if uploaded_file is not None:
     st.subheader("📌 Prediction Result")
     st.write(f"**Class:** {class_names[predicted_class]}")
     st.write(f"**Confidence:** {confidence:.2f}")
+
 
